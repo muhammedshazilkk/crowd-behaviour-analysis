@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Crowd Monitor Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Bootstrap CDN (simple style) -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { padding: 18px; }
+    #liveFrame { border: 2px solid #444; max-width: 100%; }
+    .alert-thumb { width: 160px; height: 96px; object-fit: cover; border: 1px solid #ddd; }
+    .alerts-list { max-height: 500px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h3>Crowd Behaviour Monitor — Dashboard</h3>
+    <p class="text-muted">Live annotated feed and recent alerts (snapshots & clips)</p>
+
+    <div class="row">
+      <div class="col-md-8">
+        <div class="card mb-3">
+          <div class="card-header">Live feed</div>
+          <div class="card-body text-center">
+            <img id="liveFrame" src="/snapshot" alt="Live frame" />
+            <div class="mt-2"><small>Note: refreshes automatically</small></div>
+          </div>
+        </div>
+
+        <div class="card mb-3">
+          <div class="card-header">Controls</div>
+          <div class="card-body">
+            <button id="refreshBtn" class="btn btn-primary btn-sm">Refresh Now</button>
+            <button id="downloadAll" class="btn btn-outline-secondary btn-sm">Download Alerts (zip)</button>
+            <small class="text-muted ms-2">Auto-refresh: every 1s</small>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="col-md-4">
+        <div class="card">
+          <div class="card-header">Recent Alerts</div>
+          <div class="card-body alerts-list" id="alertsList">
+            <!-- Filled by JS -->
+            <div class="text-center text-muted">Loading...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="mt-3 text-muted">
+      <small>Local demo. Alerts stored in <code>/alerts</code>. Stream reads <code>/stream/stream.jpg</code>.</small>
+    </footer>
+  </div>
+
+  <!-- JS: bootstrap + tiny script to poll snapshot & alerts -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    const liveImg = document.getElementById('liveFrame');
+    const alertsList = document.getElementById('alertsList');
+
+    // force-refresh live frame by modifying src with timestamp
+    function refreshLive() {
+      liveImg.src = '/snapshot?_=' + Date.now();
+    }
+
+    // fetch alerts list
+    async function fetchAlerts() {
+      try {
+        const res = await fetch('/api/alerts');
+        const data = await res.json();
+        const alerts = data.alerts || [];
+        if (alerts.length === 0) {
+          alertsList.innerHTML = '<div class="text-center text-muted">No alerts yet</div>';
+          return;
+        }
+        // build html
+        let html = '';
+        for (const a of alerts) {
+          const time = a.time || '';
+          const evt = a.event || '';
+          const name = a.name || '';
+          const img = a.image_url ? a.image_url : null;
+          const vid = a.video_url ? a.video_url : null;
+          html += `<div class="d-flex mb-2 align-items-center">
+            <div class="me-2">
+              ${img ? `<a href="${img}" target="_blank"><img class="alert-thumb" src="${img}" /></a>` : `<div class="alert-thumb d-flex align-items-center justify-content-center text-muted">N/A</div>`}
+            </div>
+            <div style="flex:1">
+              <div><strong>${evt.toUpperCase()}</strong> ${name ? '- ' + name : ''}</div>
+              <div class="text-muted small">${time}</div>
+              ${vid ? `<div class="mt-1"><a href="${vid}" target="_blank">Play clip</a></div>` : ''}
+            </div>
+          </div>`;
+        }
+        alertsList.innerHTML = html;
+      } catch (e) {
+        alertsList.innerHTML = '<div class="text-danger">Failed to load alerts</div>';
+      }
+    }
+
+    // auto refresh
+    setInterval(refreshLive, 1000); // every 1s
+    setInterval(fetchAlerts, 2000); // every 2s
+    document.getElementById('refreshBtn').addEventListener('click', () => { refreshLive(); fetchAlerts(); });
+    // initial
+    refreshLive(); fetchAlerts();
+  </script>
+</body>
+</html>
