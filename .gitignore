@@ -1,0 +1,14 @@
+# Virtual environment
+venv/
+env/
+
+# Python cache
+__pycache__/
+
+# Alert videos/images
+alerts/
+*.avi
+*.mp4
+
+# Logs
+*.log
