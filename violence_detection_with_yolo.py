@@ -5,6 +5,19 @@ import os
 import numpy as np
 from ultralytics import YOLO
 from tracker import CentroidTracker
+from telegram_alert import send_telegram_alert
+import json
+
+def log_event(event_type, data):
+    os.makedirs("alerts", exist_ok=True)
+    entry = {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "event": event_type,
+        "data": data
+    }
+    with open("alerts/events.jsonl", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
 
 # -----------------------------
 # ARGUMENTS
@@ -60,6 +73,8 @@ os.makedirs("stream", exist_ok=True)
 prev_time = time.time()
 
 print("Starting main loop. Press 'q' to exit.")
+log_event("SYSTEM_START", {"source": str(SOURCE)})
+
 
 # -----------------------------
 # MAIN LOOP
@@ -128,6 +143,12 @@ while cap.isOpened():
             recording = True
             alert_frames = []
             print(f"ALERT: triggered (motion={motion_score:.3f})")
+            send_telegram_alert(f"🚨 ALERT DETECTED!\nMotion Score: {motion_score:.3f}")
+            log_event("ALERT_TRIGGERED", {
+                "motion_score": round(motion_score, 3)
+            })
+
+
 
     if recording:
         alert_frames.append(display.copy())
@@ -141,6 +162,10 @@ while cap.isOpened():
             out.release()
 
             print(f"Saved alert clip: {out_path}")
+            log_event("ALERT_CLIP_SAVED", {
+                "file": out_path
+            })
+
             alerts_saved += 1
             recording = False
             alert_counter = 0
