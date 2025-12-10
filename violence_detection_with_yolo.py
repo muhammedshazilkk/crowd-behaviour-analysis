@@ -1,154 +1,184 @@
-# violence_detection_with_yolo.py
-import cv2, os, time, argparse
+import cv2
+import time
+import argparse
+import os
 import numpy as np
 from ultralytics import YOLO
+from tracker import CentroidTracker
 
-# -------------------
+# -----------------------------
+# ARGUMENTS
+# -----------------------------
 parser = argparse.ArgumentParser()
-parser.add_argument('--source', type=str, default='0', help='0 for webcam or path to video file')
+parser.add_argument("--source", type=str, default="0", help="0 for webcam or video file path")
 args = parser.parse_args()
-SOURCE = 0 if args.source == '0' else args.source
+SOURCE = 0 if args.source == "0" else args.source
 
-# -------------------
-# Params (tune these)
+# -----------------------------
+# PARAMETERS
+# -----------------------------
 RESIZE_WIDTH = 640
-THRESHOLD_SCORE = 0.15
-CONSEC_FRAMES = 6
-MIN_AREA = 300
-DURATION_SAVE = 2
-RUN_YOLO_EVERY = 4     # run YOLO every 4 frames
-YOLO_CONF = 0.35
+THRESHOLD_SCORE = 0.15         # motion threshold
+CONSEC_FRAMES = 6              # frames required to trigger alert
+ALERT_CLIP_LENGTH = 48         # frames to save during alert
 
-# Weapon labels to check (example). Update if your model uses different names.
-WEAPON_LABELS = {'knife', 'scissors', 'fork'}  # COCO doesn't have gun; update later with custom model
-
-# -------------------
-if not os.path.exists('alerts'):
-    os.makedirs('alerts')
-
-# init YOLO
+# -----------------------------
+# LOAD YOLO
+# -----------------------------
 print("Loading YOLO model...")
-yolo = YOLO('yolov8n.pt')
-print("YOLO loaded. Class names:", yolo.model.names)
+model = YOLO("yolov8n.pt")
+print("YOLO loaded.")
 
-# Video capture
+# -----------------------------
+# TRACKER
+# -----------------------------
+tracker = CentroidTracker()
+
+# -----------------------------
+# VIDEO CAPTURE
+# -----------------------------
 cap = cv2.VideoCapture(SOURCE)
-time.sleep(0.3)
-if not cap.isOpened():
-    print("ERROR: cannot open source", SOURCE)
-    exit(1)
 
-ret, frame = cap.read()
-if not ret:
-    print("ERROR: empty input.")
-    cap.release()
-    exit(1)
-
-h, w = frame.shape[:2]
-ratio = RESIZE_WIDTH / w
-frame_size = (RESIZE_WIDTH, int(h * ratio))
-
-# background subtractor
-fgbg = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=25)
-
+# -----------------------------
+# MOTION DETECTION INIT
+# -----------------------------
+prev_gray = None
 alert_counter = 0
-alert_active = False
-alert_start = None
+recording = False
 alert_frames = []
-frame_idx = 0
 alerts_saved = 0
 
+# -----------------------------
+# STREAM & ALERT FOLDERS
+# -----------------------------
+os.makedirs("alerts", exist_ok=True)
+os.makedirs("stream", exist_ok=True)
+
+# -----------------------------
+# FPS COUNTER
+# -----------------------------
+prev_time = time.time()
+
 print("Starting main loop. Press 'q' to exit.")
-while True:
+
+# -----------------------------
+# MAIN LOOP
+# -----------------------------
+while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
-    frame_idx += 1
-    frame = cv2.resize(frame, frame_size)
+
+    frame = cv2.resize(frame, (RESIZE_WIDTH, int(frame.shape[0] * RESIZE_WIDTH / frame.shape[1])))
+    display = frame.copy()
+
+    # -----------------------------
+    # MOTION DETECTION
+    # -----------------------------
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    fgmask = fgbg.apply(gray)
-    _, thresh = cv2.threshold(fgmask, 25, 255, cv2.THRESH_BINARY)
-    thresh = cv2.erode(thresh, None, iterations=2)
-    thresh = cv2.dilate(thresh, None, iterations=2)
-    cnts, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    gray = cv2.GaussianBlur(gray, (7, 7), 0)
 
-    motion_score = 0
-    for c in cnts:
-        area = cv2.contourArea(c)
-        if area < MIN_AREA:
-            continue
-        motion_score += area
-    motion_score = min(1.0, motion_score / (frame_size[0] * frame_size[1]))
+    if prev_gray is None:
+        prev_gray = gray
+        continue
 
-    # detect via YOLO every RUN_YOLO_EVERY frames
-    weapon_detected = False
-    yolo_annotations = None
-    if frame_idx % RUN_YOLO_EVERY == 0:
-        results = yolo(frame, conf=YOLO_CONF, verbose=False)
-        # results[0] contains detection; use .boxes to iterate
-        if len(results) > 0:
-            boxes = results[0].boxes
-            # draw and check for weapon labels
-            annotated = results[0].plot()  # annotated image
-            yolo_annotations = annotated
-            for box in boxes:
-                conf = float(box.conf[0])
-                cls = int(box.cls[0])
-                name = yolo.model.names[cls]
-                # check if label in weapon list
-                if name.lower() in WEAPON_LABELS and conf >= YOLO_CONF:
-                    weapon_detected = True
-        else:
-            yolo_annotations = frame.copy()
+    frame_diff = cv2.absdiff(prev_gray, gray)
+    _, thresh = cv2.threshold(frame_diff, 25, 255, cv2.THRESH_BINARY)
+    motion_score = np.sum(thresh) / thresh.size
 
-    # simple fusion: treat high motion as suspicious
+    prev_gray = gray
+
     if motion_score > THRESHOLD_SCORE:
         alert_counter += 1
     else:
         alert_counter = 0
 
-    if alert_counter >= CONSEC_FRAMES or weapon_detected:
-        if not alert_active:
-            alert_active = True
-            alert_start = time.time()
-            print(f"ALERT: triggered at frame {frame_idx} (motion={motion_score:.3f}, weapon={weapon_detected})")
+    # -----------------------------
+    # YOLO DETECTION
+    # -----------------------------
+    results = model(frame, verbose=False)[0]
+    person_bboxes = []
 
-    # record frames during alert
-    if alert_active:
-        # prefer annotated frame for saving
-        if yolo_annotations is not None:
-            alert_frames.append(yolo_annotations.copy())
-        else:
-            alert_frames.append(frame.copy())
+    for box in results.boxes:
+        cls_id = int(box.cls[0])
+        conf = float(box.conf[0])
+        if model.names[cls_id] == "person" and conf > 0.4:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            person_bboxes.append((x1, y1, x2, y2))
+            cv2.rectangle(display, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            cv2.putText(display, f"person {conf:.2f}", (x1, y1-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
-        if time.time() - alert_start >= DURATION_SAVE:
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            outname = f"alerts/alert_{timestamp}.avi"
-            fourcc = cv2.VideoWriter_fourcc(*'XVID')
-            out = cv2.VideoWriter(outname, fourcc, 20.0, frame_size)
+    # -----------------------------
+    # ✅ TRACKING (DAY 5 STEP 2)
+    # -----------------------------
+    tracked_objects = tracker.update(person_bboxes)
+
+    for objectID, centroid in tracked_objects.items():
+        text = f"Person-{objectID}"
+        cv2.putText(display, text, (centroid[0] - 10, centroid[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.circle(display, (centroid[0], centroid[1]), 4, (0, 255, 255), -1)
+
+    # -----------------------------
+    # ✅ ALERT TRIGGER
+    # -----------------------------
+    if alert_counter >= CONSEC_FRAMES:
+        if not recording:
+            recording = True
+            alert_frames = []
+            print(f"ALERT: triggered (motion={motion_score:.3f})")
+
+    if recording:
+        alert_frames.append(display.copy())
+        if len(alert_frames) >= ALERT_CLIP_LENGTH:
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            out_path = f"alerts/alert_{ts}.avi"
+            h, w, _ = alert_frames[0].shape
+            out = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"XVID"), 10, (w, h))
             for f in alert_frames:
                 out.write(f)
             out.release()
+
+            print(f"Saved alert clip: {out_path}")
             alerts_saved += 1
-            print("Saved alert clip:", outname)
-            alert_frames = []
-            alert_active = False
+            recording = False
             alert_counter = 0
-            weapon_detected = False
 
-    # display annotated (if available) else original with overlay
-    display_frame = yolo_annotations if yolo_annotations is not None else frame.copy()
-    status = "ALERT" if alert_active else "NORMAL"
-    color = (0,0,255) if alert_active else (0,255,0)
-    cv2.putText(display_frame, f"Status: {status}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-    cv2.putText(display_frame, f"Score: {motion_score:.3f}", (10,60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-    if weapon_detected:
-        cv2.putText(display_frame, "WEAPON DETECTED", (10,90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+    # -----------------------------
+    # ✅ STATUS + FPS
+    # -----------------------------
+    status = "ALERT" if recording else "NORMAL"
+    color = (0, 0, 255) if recording else (0, 255, 0)
 
-    cv2.imshow("Crowd Monitor (Motion + YOLO)", display_frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    curr_time = time.time()
+    fps = int(1 / (curr_time - prev_time))
+    prev_time = curr_time
+
+    cv2.putText(display, f"Status: {status}", (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+    cv2.putText(display, f"Score: {motion_score:.3f}", (20, 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(display, f"FPS: {fps}", (20, 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+    # -----------------------------
+    # ✅ SAVE STREAM FRAME FOR DASHBOARD
+    # -----------------------------
+    try:
+        cv2.imwrite("stream/stream.jpg",
+                    cv2.resize(display, (800, int(display.shape[0] * 800 / display.shape[1]))))
+    except:
+        pass
+
+    cv2.imshow("YOLOv8 Live", display)
+
+    if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
+# -----------------------------
+# CLEANUP
+# -----------------------------
 cap.release()
 cv2.destroyAllWindows()
 print("Done. Alerts saved:", alerts_saved)
